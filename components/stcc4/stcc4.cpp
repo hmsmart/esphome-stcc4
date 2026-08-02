@@ -22,7 +22,7 @@ void STCC4Component::setup() {
   ESP_LOGCONFIG(TAG, "Setting up STCC4...");
 
   // Unconditionally stop any running measurement from a previous boot
-  this->write_command(STCC4_CMD_STOP_PERIODIC_MEASUREMENT);
+  this->write_command(STCC4_CMD_STOP_CONTINUOUS_MEASUREMENT);
 
   this->set_timeout(500, [this]() {
     // Wake sensor from sleep mode...
