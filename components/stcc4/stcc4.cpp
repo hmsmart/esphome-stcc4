@@ -21,14 +21,14 @@ static const uint8_t STCC4_CMD_EXIT_SLEEP_MODE = 0x00;
 void STCC4Component::setup() {
   ESP_LOGCONFIG(TAG, "Setting up STCC4...");
 
-  // Wake sensor from sleep mode (send single byte 0x00)
-  // The sensor needs some time after power-up
-  this->set_timeout(100, [this]() {
-    // Send exit sleep mode command (8-bit, NACK expected if already awake)
+  // Unconditionally stop any running measurement from a previous boot
+  this->write_command(STCC4_CMD_STOP_CONTINUOUS_MEASUREMENT);
+
+  this->set_timeout(1500, [this]() {
+    // Wake sensor from sleep mode...
     if (!this->write_command(STCC4_CMD_EXIT_SLEEP_MODE)) {
       ESP_LOGW(TAG, "Failed to send exit sleep command, sensor may already be awake");
     }
-
     // Wait 5ms for sensor to be ready after exiting sleep
     this->set_timeout(5, [this]() {
       // Read product ID to verify communication (6 words: 2 for product_id + 4 for serial)
