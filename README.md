@@ -58,6 +58,9 @@ binary_sensor:
       - component.update: my_stcc4
 ```
 
-The 5s–600s bound is not enforced in this case, because the real sampling cadence lives in your
-automation rather than in the config. It still applies: if you trigger measurements further apart
-than 600 s, self-calibration degrades exactly as it would with a too-long update interval.
+The 5s–600s bound is not enforced at validation time in this case, because the real sampling
+cadence lives in your automation rather than in the config. It still applies: if you trigger
+measurements further apart than 600 s, self-calibration degrades exactly as it would with a
+too-long update interval. The component measures the gap between single shot measurements at
+runtime and logs a warning when it exceeds 600 s, so this shows up in the log rather than silently
+in the readings weeks later.

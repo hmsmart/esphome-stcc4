@@ -106,6 +106,9 @@ static const uint32_t STCC4_RETRY_DELAY = 150; // datasheet: retry after 150ms
 static const float STCC4_MIN_PRESSURE_HPA = 400.0f;
 static const float STCC4_MAX_PRESSURE_HPA = 1100.0f;
 
+// Datasheet 3.4.6: longest single shot sampling interval the ASC algorithm tolerates
+static const uint32_t STCC4_MAX_GAP_MS = 600000;
+
 void STCC4Component::update() {
   if (!this->initialized_) {
     return;
@@ -118,6 +121,18 @@ void STCC4Component::update() {
     this->read_measurement_();
     return;
   }
+
+  // Datasheet 3.4.6 step 6: sampling slower than 600 s degrades the self-calibration algorithm.
+  // The config schema bounds update_interval, but it cannot see the cadence when polling is driven
+  // by the component.update action (update_interval: never), and it cannot account for a gap that
+  // opens up at runtime - a reboot, an offline stretch, a slow automation. Warn here instead.
+  // Unsigned subtraction is wraparound-safe; a zero timestamp means this is the first measurement.
+  const uint32_t now = millis();
+  if (this->last_measurement_time_ != 0 && now - this->last_measurement_time_ > STCC4_MAX_GAP_MS) {
+    ESP_LOGW(TAG, "%" PRIu32 " s since last measurement, self-calibration expects at most 600 s",
+             (now - this->last_measurement_time_) / 1000);
+  }
+  this->last_measurement_time_ = now;
 
   // Single shot follows datasheet 3.4.6: wake -> measure -> read -> sleep. The sensor spends the
   // interval between measurements in sleep (1 uA) rather than idle (55 uA).

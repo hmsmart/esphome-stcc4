@@ -44,6 +44,7 @@ class STCC4Component : public PollingComponent, public sensirion_common::Sensiri
   sensor::Sensor *ambient_pressure_source_{nullptr};
 
   uint16_t ambient_pressure_{0};
+  uint32_t last_measurement_time_{0};
   bool initialized_{false};
   MeasurementMode measurement_mode_{CONTINUOUS};
 };
