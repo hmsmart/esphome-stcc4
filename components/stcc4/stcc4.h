@@ -33,6 +33,7 @@ class STCC4Component : public PollingComponent, public sensirion_common::Sensiri
   void write_compensation_();
   bool start_measurement_();
   void read_measurement_();
+  void attempt_read_measurement_();
   bool try_read_measurement_();
   void finish_measurement_();
 
@@ -45,6 +46,7 @@ class STCC4Component : public PollingComponent, public sensirion_common::Sensiri
 
   uint16_t ambient_pressure_{0};
   uint32_t last_measurement_time_{0};
+  uint8_t read_retries_left_{0};
   bool initialized_{false};
   MeasurementMode measurement_mode_{CONTINUOUS};
 };

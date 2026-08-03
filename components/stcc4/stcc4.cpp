@@ -199,25 +199,26 @@ void STCC4Component::finish_measurement_() {
 }
 
 void STCC4Component::read_measurement_() {
+  this->read_retries_left_ = STCC4_READ_RETRIES;
+  this->attempt_read_measurement_();
+}
+
+void STCC4Component::attempt_read_measurement_() {
   if (this->try_read_measurement_()) {
     this->finish_measurement_();
     return;
   }
 
-  this->set_retry(STCC4_RETRY_DELAY, STCC4_READ_RETRIES, [this](uint8_t remaining) {
-    if (this->try_read_measurement_()) {
-      this->finish_measurement_();
-      return RetryResult::DONE;
-    }
-    if (remaining == 0) {
-      ESP_LOGW(TAG, "Failed to read measurement data after %u attempts", STCC4_READ_RETRIES + 1);
-      this->status_set_warning();
-      this->finish_measurement_();  // give up on the reading, but still release the sensor
-      return RetryResult::DONE;
-    }
-    ESP_LOGD(TAG, "Measurement read failed, %u retries left", remaining);
-    return RetryResult::RETRY;
-  });
+  if (this->read_retries_left_ == 0) {
+    ESP_LOGW(TAG, "Failed to read measurement data after %u attempts", STCC4_READ_RETRIES + 1);
+    this->status_set_warning();
+    this->finish_measurement_();  // give up on the reading, but still release the sensor
+    return;
+  }
+
+  ESP_LOGD(TAG, "Measurement read failed, %u retries left", this->read_retries_left_);
+  this->read_retries_left_--;
+  this->set_timeout(STCC4_RETRY_DELAY, [this]() { this->attempt_read_measurement_(); });
 }
 
 bool STCC4Component::try_read_measurement_() {
