@@ -18,3 +18,23 @@ Connect the power supply and the I2C from the microcontroller to the sensor. Be 
 
 ### Step 2: Configure your ESPHome device with YAML
 See the file `example_stcc4.yaml`
+
+## Choosing an update interval
+
+**Continuous mode: use 5s or higher.** Avoid `update_interval: 1s`.
+
+In continuous mode the sensor samples on its own 1 s schedule, with an effective interval of
+1000 ms ± 150 ms (datasheet §3.4.1), and holds the most recent result until it is read out. Polling
+at 1 s puts the ESP clock and the sensor clock into a phase fight: a read that lands early is NACKed
+("no measurement data available", §3.4.3), and the retry that eventually succeeds 150 ms later
+empties the buffer 150 ms *after* the poll that requested it. The next poll then fires only 850 ms
+after that read and is early again — permanently. Readings still arrive, but every one of them costs
+two failed reads first.
+
+At 5 s or above, every poll finds data waiting and succeeds on the first attempt. This costs you
+nothing in signal quality: CO₂ response time is τ63% = 20 s (datasheet Table 1), so 1 s polling only
+resamples the same 20-second-smoothed value more often.
+
+**Single shot mode: use between 5s and 600s.** The automatic self-calibration algorithm assumes a
+sampling interval in this range (datasheet §3.4.6); intervals outside it degrade calibration over
+time. 10 s is the datasheet's reference figure for the specified accuracy and average current.

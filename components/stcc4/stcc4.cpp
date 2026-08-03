@@ -146,9 +146,20 @@ void STCC4Component::read_measurement_() {
 
 bool STCC4Component::try_read_measurement_() {
   // Read measurement data: 4 words (CO2, temperature, humidity, status)
+  //
+  // Deliberately split instead of using get_register(): the sensor NACKs the read whenever no
+  // measurement is available yet (datasheet 3.4.3), which is an expected part of the poll/retry
+  // cycle, and get_register() logs every one of those at ERROR level. write_command()/read_data()
+  // issue exactly the same bus traffic without the noise.
   uint16_t raw_data[4];
-  if (!this->get_register(STCC4_CMD_READ_MEASUREMENT, raw_data, 4, 1)) {
+  if (!this->write_command(STCC4_CMD_READ_MEASUREMENT)) {
+    // The sensor did not acknowledge its address - a real bus problem, not just "no data yet"
+    ESP_LOGD(TAG, "Read measurement command not acknowledged");
     return false;
+  }
+  delay(1);  // datasheet 3.4.3: 1 ms execution time
+  if (!this->read_data(raw_data, 4)) {
+    return false;  // no measurement available yet - caller retries
   }
 
   // CO2 value is in ppm as int16 (can be negative during warm-up)
