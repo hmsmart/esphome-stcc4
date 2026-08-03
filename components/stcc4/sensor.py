@@ -66,7 +66,12 @@ CONFIG_SCHEMA = (
             ),
             cv.Optional(CONF_TEMPERATURE_SOURCE): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_HUMIDITY_SOURCE): cv.use_id(sensor.Sensor),
-            cv.Optional(CONF_AMBIENT_PRESSURE_COMPENSATION): cv.pressure,
+            # Range the sensor accepts, in hPa (datasheet 3.4.5: 40'000 - 110'000 Pa). cv.pressure
+            # alone does not range check, so an out-of-range value would reach the uint16_t cast in
+            # set_ambient_pressure_compensation() unvalidated.
+            cv.Optional(CONF_AMBIENT_PRESSURE_COMPENSATION): cv.All(
+                cv.pressure, cv.Range(min=400, max=1100)
+            ),
             cv.Optional(CONF_AMBIENT_PRESSURE_COMPENSATION_SOURCE): cv.use_id(
                 sensor.Sensor
             ),

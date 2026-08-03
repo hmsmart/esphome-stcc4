@@ -1,5 +1,6 @@
 #include "stcc4.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
@@ -92,6 +93,10 @@ void STCC4Component::dump_config() {
 static const uint8_t STCC4_READ_RETRIES = 2;   // 3 attempts total
 static const uint32_t STCC4_RETRY_DELAY = 150; // datasheet: retry after 150ms
 
+// Range the sensor accepts for pressure input, in hPa (datasheet 3.4.5: 40'000 - 110'000 Pa)
+static const float STCC4_MIN_PRESSURE_HPA = 400.0f;
+static const float STCC4_MAX_PRESSURE_HPA = 1100.0f;
+
 void STCC4Component::update() {
   if (!this->initialized_) {
     return;
@@ -104,10 +109,17 @@ void STCC4Component::update() {
   if (this->ambient_pressure_source_ != nullptr) {
     float pressure = this->ambient_pressure_source_->state;
     if (!std::isnan(pressure)) {
-      uint16_t new_pressure = static_cast<uint16_t>(pressure);
+      // Clamp before casting. This is a runtime value from another sensor, so it can be anything;
+      // a negative float converted to uint16_t is undefined behavior. The bounds are the range the
+      // sensor itself accepts (datasheet 3.4.5), which also keeps the hPa -> Pa/2 scaling in
+      // update_ambient_pressure_compensation_() from overflowing uint16_t.
+      uint16_t new_pressure = static_cast<uint16_t>(clamp(pressure, STCC4_MIN_PRESSURE_HPA, STCC4_MAX_PRESSURE_HPA));
       if (new_pressure != this->ambient_pressure_) {
-        this->update_ambient_pressure_compensation_(new_pressure);
-        this->ambient_pressure_ = new_pressure;
+        // Only cache on success - otherwise a single failed write would match on every later poll
+        // and permanently suppress the retry, leaving the sensor on a stale compensation value.
+        if (this->update_ambient_pressure_compensation_(new_pressure)) {
+          this->ambient_pressure_ = new_pressure;
+        }
       }
     }
   }
@@ -146,9 +158,20 @@ void STCC4Component::read_measurement_() {
 
 bool STCC4Component::try_read_measurement_() {
   // Read measurement data: 4 words (CO2, temperature, humidity, status)
+  //
+  // Deliberately split instead of using get_register(): the sensor NACKs the read whenever no
+  // measurement is available yet (datasheet 3.4.3), which is an expected part of the poll/retry
+  // cycle, and get_register() logs every one of those at ERROR level. write_command()/read_data()
+  // issue exactly the same bus traffic without the noise.
   uint16_t raw_data[4];
-  if (!this->get_register(STCC4_CMD_READ_MEASUREMENT, raw_data, 4, 1)) {
+  if (!this->write_command(STCC4_CMD_READ_MEASUREMENT)) {
+    // The sensor did not acknowledge its address - a real bus problem, not just "no data yet"
+    ESP_LOGD(TAG, "Read measurement command not acknowledged");
     return false;
+  }
+  delay(1);  // datasheet 3.4.3: 1 ms execution time
+  if (!this->read_data(raw_data, 4)) {
+    return false;  // no measurement available yet - caller retries
   }
 
   // CO2 value is in ppm as int16 (can be negative during warm-up)
@@ -186,8 +209,15 @@ bool STCC4Component::update_rht_compensation_() {
   // Convert to ticks using SHT4x formula:
   // temperature = -45 + 175 * (ticks / 65535)
   // humidity = -6 + 125 * (ticks / 65535)
-  uint16_t temp_ticks = static_cast<uint16_t>(((temperature + 45.0f) / 175.0f) * 65535.0f);
-  uint16_t humidity_ticks = static_cast<uint16_t>(((humidity + 6.0f) / 125.0f) * 65535.0f);
+  //
+  // Clamp before casting. A source reading below -45 C or below -6 %RH makes these expressions
+  // negative, and converting a negative float to uint16_t is undefined behavior - in practice it
+  // writes a garbage compensation value the sensor will happily use. Both bounds are reachable:
+  // an SHT4x reports slightly negative humidity near 0 %RH, and reads out of range when faulty.
+  float temp_ticks_f = ((temperature + 45.0f) / 175.0f) * 65535.0f;
+  float humidity_ticks_f = ((humidity + 6.0f) / 125.0f) * 65535.0f;
+  uint16_t temp_ticks = static_cast<uint16_t>(clamp(temp_ticks_f, 0.0f, 65535.0f));
+  uint16_t humidity_ticks = static_cast<uint16_t>(clamp(humidity_ticks_f, 0.0f, 65535.0f));
 
   uint16_t data[2] = {temp_ticks, humidity_ticks};
   if (!this->write_command(STCC4_CMD_SET_RHT_COMPENSATION, data, 2)) {
