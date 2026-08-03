@@ -10,6 +10,7 @@ from esphome.const import (
     CONF_MEASUREMENT_MODE,
     CONF_TEMPERATURE,
     CONF_TEMPERATURE_SOURCE,
+    CONF_UPDATE_INTERVAL,
     DEVICE_CLASS_CARBON_DIOXIDE,
     DEVICE_CLASS_HUMIDITY,
     DEVICE_CLASS_TEMPERATURE,
@@ -39,7 +40,33 @@ MEASUREMENT_MODE_OPTIONS = {
     "single_shot": MeasurementMode.SINGLE_SHOT,
 }
 
-CONFIG_SCHEMA = (
+# Datasheet 3.4.6 step 6: single shot mode expects a sampling interval between 5s and 600s
+SINGLE_SHOT_MIN_INTERVAL_MS = 5_000
+SINGLE_SHOT_MAX_INTERVAL_MS = 600_000
+
+
+def _validate_single_shot_interval(config):
+    """Bound update_interval in single shot mode.
+
+    Outside the 5s-600s window the automatic self-calibration algorithm degrades. That failure is
+    silent and takes days to become visible in the readings, so it is worth rejecting at validation
+    time rather than letting it run. Continuous mode is unconstrained: it drives its own 1s
+    sampling and update_interval only controls how often the buffered result is read out.
+    """
+    if config[CONF_MEASUREMENT_MODE] != "single_shot":
+        return config
+
+    interval_ms = config[CONF_UPDATE_INTERVAL].total_milliseconds
+    if not SINGLE_SHOT_MIN_INTERVAL_MS <= interval_ms <= SINGLE_SHOT_MAX_INTERVAL_MS:
+        raise cv.Invalid(
+            f"update_interval must be between 5s and 600s in single_shot measurement mode, "
+            f"got {interval_ms / 1000:g}s. The sensor's automatic self-calibration assumes a "
+            f"sampling interval in this range (datasheet 3.4.6).",
+            path=[CONF_UPDATE_INTERVAL],
+        )
+    return config
+
+CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(STCC4Component),
@@ -81,7 +108,8 @@ CONFIG_SCHEMA = (
         }
     )
     .extend(cv.polling_component_schema("60s"))
-    .extend(i2c.i2c_device_schema(0x64))
+    .extend(i2c.i2c_device_schema(0x64)),
+    _validate_single_shot_interval,
 )
 
 SENSOR_MAP = {
