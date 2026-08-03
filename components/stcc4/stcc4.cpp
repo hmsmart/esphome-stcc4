@@ -111,6 +111,10 @@ static const uint32_t STCC4_MAX_GAP_MS = 600000;
 
 void STCC4Component::update() {
   if (!this->initialized_) {
+    // Reachable from the component.update action, which can fire well before setup() finishes -
+    // an on_boot automation runs while the startup chain is still waiting out the stop command.
+    // Say so rather than returning silently, since the caller asked for a measurement explicitly.
+    ESP_LOGW(TAG, "Not initialized yet, measurement skipped");
     return;
   }
 
