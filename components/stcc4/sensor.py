@@ -44,6 +44,10 @@ MEASUREMENT_MODE_OPTIONS = {
 SINGLE_SHOT_MIN_INTERVAL_MS = 5_000
 SINGLE_SHOT_MAX_INTERVAL_MS = 600_000
 
+# "never" disables automatic polling entirely; measurements are then driven by the component.update
+# action. Resolved from the validator rather than hardcoded so it tracks the sentinel ESPHome uses.
+NEVER_INTERVAL_MS = cv.update_interval("never").total_milliseconds
+
 
 def _validate_single_shot_interval(config):
     """Bound update_interval in single shot mode.
@@ -57,6 +61,12 @@ def _validate_single_shot_interval(config):
         return config
 
     interval_ms = config[CONF_UPDATE_INTERVAL].total_milliseconds
+    if interval_ms == NEVER_INTERVAL_MS:
+        # Automatic polling is off and measurements come from the component.update action, so the
+        # real sampling cadence lives in the user's automation and cannot be checked here. The
+        # datasheet constraint still applies to how often they actually trigger it.
+        return config
+
     if not SINGLE_SHOT_MIN_INTERVAL_MS <= interval_ms <= SINGLE_SHOT_MAX_INTERVAL_MS:
         raise cv.Invalid(
             f"update_interval must be between 5s and 600s in single_shot measurement mode, "

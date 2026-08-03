@@ -44,3 +44,20 @@ In single shot mode the sensor is held in sleep mode between measurements and wo
 1 µA against 55 µA for idle and 950 µA for continuous mode (datasheet Table 3), so a longer update
 interval directly buys battery life. Compensation values and calibration state survive sleep
 (§3.4.7) and are not re-sent on each wake.
+
+### On-demand measurements
+
+`update_interval: never` is accepted in single shot mode. It disables automatic polling and leaves
+the sensor asleep until something triggers a measurement explicitly:
+
+```yaml
+binary_sensor:
+  - platform: gpio
+    pin: GPIO0
+    on_press:
+      - component.update: my_stcc4
+```
+
+The 5s–600s bound is not enforced in this case, because the real sampling cadence lives in your
+automation rather than in the config. It still applies: if you trigger measurements further apart
+than 600 s, self-calibration degrades exactly as it would with a too-long update interval.
