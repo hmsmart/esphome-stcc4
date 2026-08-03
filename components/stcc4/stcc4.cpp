@@ -89,6 +89,9 @@ void STCC4Component::dump_config() {
   LOG_SENSOR("  ", "Humidity", this->humidity_sensor_);
 }
 
+static const uint8_t STCC4_READ_RETRIES = 2;   // 3 attempts total
+static const uint32_t STCC4_RETRY_DELAY = 150; // datasheet: retry after 150ms
+
 void STCC4Component::update() {
   if (!this->initialized_) {
     return;
@@ -111,7 +114,6 @@ void STCC4Component::update() {
 
   uint32_t wait_time = 0;
   if (this->measurement_mode_ == SINGLE_SHOT) {
-    // Start single shot measurement
     if (!this->write_command(STCC4_CMD_MEASURE_SINGLE_SHOT)) {
       ESP_LOGW(TAG, "Failed to start single shot measurement");
       this->status_set_warning();
@@ -120,37 +122,53 @@ void STCC4Component::update() {
     wait_time = 500;  // Single shot takes 500ms
   }
 
-  this->set_timeout(wait_time, [this]() {
-    // Read measurement data: 4 words (CO2, temperature, humidity, status)
-    uint16_t raw_data[4];
-    if (!this->get_register(STCC4_CMD_READ_MEASUREMENT, raw_data, 4, 1)) {
-      ESP_LOGW(TAG, "Failed to read measurement data");
+  this->set_timeout(wait_time, [this]() { this->read_measurement_(); });
+}
+
+void STCC4Component::read_measurement_() {
+  if (this->try_read_measurement_()) {
+    return;
+  }
+
+  this->set_retry(STCC4_RETRY_DELAY, STCC4_READ_RETRIES, [this](uint8_t remaining) {
+    if (this->try_read_measurement_()) {
+      return RetryResult::DONE;
+    }
+    if (remaining == 0) {
+      ESP_LOGW(TAG, "Failed to read measurement data after %u attempts", STCC4_READ_RETRIES + 1);
       this->status_set_warning();
-      return;
+      return RetryResult::DONE;
     }
-
-    // CO2 value is in ppm as int16 (can be negative during warm-up)
-    int16_t co2_raw = static_cast<int16_t>(raw_data[0]);
-
-    // Only publish valid CO2 values (non-negative)
-    if (co2_raw >= 0 && this->co2_sensor_ != nullptr) {
-      this->co2_sensor_->publish_state(co2_raw);
-    }
-
-    // Temperature: -45 + 175 * (raw / 65535)
-    if (this->temperature_sensor_ != nullptr) {
-      float temperature = -45.0f + (175.0f * raw_data[1]) / 65535.0f;
-      this->temperature_sensor_->publish_state(temperature);
-    }
-
-    // Humidity: -6 + 125 * (raw / 65535)
-    if (this->humidity_sensor_ != nullptr) {
-      float humidity = -6.0f + (125.0f * raw_data[2]) / 65535.0f;
-      this->humidity_sensor_->publish_state(humidity);
-    }
-
-    this->status_clear_warning();
+    ESP_LOGD(TAG, "Measurement read failed, %u retries left", remaining);
+    return RetryResult::RETRY;
   });
+}
+
+bool STCC4Component::try_read_measurement_() {
+  // Read measurement data: 4 words (CO2, temperature, humidity, status)
+  uint16_t raw_data[4];
+  if (!this->get_register(STCC4_CMD_READ_MEASUREMENT, raw_data, 4, 1)) {
+    return false;
+  }
+
+  // CO2 value is in ppm as int16 (can be negative during warm-up)
+  int16_t co2_raw = static_cast<int16_t>(raw_data[0]);
+  if (co2_raw >= 0 && this->co2_sensor_ != nullptr) {
+    this->co2_sensor_->publish_state(co2_raw);
+  }
+
+  // Temperature: -45 + 175 * (raw / 65535)
+  if (this->temperature_sensor_ != nullptr) {
+    this->temperature_sensor_->publish_state(-45.0f + (175.0f * raw_data[1]) / 65535.0f);
+  }
+
+  // Humidity: -6 + 125 * (raw / 65535)
+  if (this->humidity_sensor_ != nullptr) {
+    this->humidity_sensor_->publish_state(-6.0f + (125.0f * raw_data[2]) / 65535.0f);
+  }
+
+  this->status_clear_warning();
+  return true;
 }
 
 bool STCC4Component::update_rht_compensation_() {

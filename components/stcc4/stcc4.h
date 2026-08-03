@@ -31,6 +31,8 @@ class STCC4Component : public PollingComponent, public sensirion_common::Sensiri
   bool update_rht_compensation_();
   bool update_ambient_pressure_compensation_(uint16_t pressure_in_hpa);
   bool start_measurement_();
+  void read_measurement_();
+  bool try_read_measurement_();
 
   sensor::Sensor *co2_sensor_{nullptr};
   sensor::Sensor *temperature_sensor_{nullptr};
