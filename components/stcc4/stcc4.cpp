@@ -267,6 +267,16 @@ void STCC4Component::restart_measurement_() {
   this->write_command(STCC4_CMD_STOP_CONTINUOUS_MEASUREMENT);
   this->set_timeout(STCC4_STOP_TIME_MS, [this]() {
     this->restarting_ = false;
+
+    // One of the things that strands a measurement is the sensor losing power on its own, and a
+    // power cycle resets pressure compensation to the 101'300 Pa default (datasheet 3.4.5). A
+    // configured static value is written once in setup() and never again, so without this it would
+    // be silently lost exactly when the sensor most needs restoring. A source-driven value repairs
+    // itself on the next poll, and RHT is rewritten every cycle, so neither needs handling here.
+    if (this->ambient_pressure_source_ == nullptr && this->ambient_pressure_ != 0) {
+      this->update_ambient_pressure_compensation_(this->ambient_pressure_);
+    }
+
     this->start_measurement_();
   });
 }
