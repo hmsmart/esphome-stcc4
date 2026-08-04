@@ -16,8 +16,15 @@ static const uint16_t STCC4_CMD_MEASURE_SINGLE_SHOT = 0x219d;
 static const uint16_t STCC4_CMD_GET_PRODUCT_ID = 0x365b;
 static const uint16_t STCC4_CMD_SET_RHT_COMPENSATION = 0xe000;
 static const uint16_t STCC4_CMD_SET_PRESSURE_COMPENSATION = 0xe016;
+static const uint16_t STCC4_CMD_ENTER_SLEEP_MODE = 0x3650;
 // Exit sleep is an 8-bit command (single byte 0x00), not 16-bit
 static const uint8_t STCC4_CMD_EXIT_SLEEP_MODE = 0x00;
+
+// Datasheet 3.4.8: exit_sleep_mode execution time
+static const uint32_t STCC4_WAKEUP_TIME_MS = 5;
+// Datasheet 3.4.6: measure_single_shot execution time is 500 ms; the margin keeps the common path
+// off the exact boundary so a ready measurement is not missed by scheduler jitter alone
+static const uint32_t STCC4_SINGLE_SHOT_TIME_MS = 550;
 
 void STCC4Component::setup() {
   ESP_LOGCONFIG(TAG, "Setting up STCC4...");
@@ -26,12 +33,11 @@ void STCC4Component::setup() {
   this->write_command(STCC4_CMD_STOP_CONTINUOUS_MEASUREMENT);
 
   this->set_timeout(1500, [this]() {
-    // Wake sensor from sleep mode...
-    if (!this->write_command(STCC4_CMD_EXIT_SLEEP_MODE)) {
-      ESP_LOGW(TAG, "Failed to send exit sleep command, sensor may already be awake");
-    }
-    // Wait 5ms for sensor to be ready after exiting sleep
-    this->set_timeout(5, [this]() {
+    // Wake sensor from sleep mode. Datasheet 3.4.8: the payload byte is deliberately not
+    // acknowledged, so write_command() reports failure even when the wake succeeds - there is
+    // nothing meaningful to check. The product ID read below is what confirms the sensor is awake.
+    this->write_command(STCC4_CMD_EXIT_SLEEP_MODE);
+    this->set_timeout(STCC4_WAKEUP_TIME_MS, [this]() {
       // Read product ID to verify communication (6 words: 2 for product_id + 4 for serial)
       uint16_t raw_product_id[6];
       if (!this->get_register(STCC4_CMD_GET_PRODUCT_ID, raw_product_id, 6, 1)) {
@@ -56,9 +62,12 @@ void STCC4Component::setup() {
 
       this->initialized_ = true;
 
-      // Start continuous measurement if in continuous mode
       if (this->measurement_mode_ == CONTINUOUS) {
         this->start_measurement_();
+      } else {
+        // Park the sensor in sleep until the first update(). setup() left it in idle (55 uA) after
+        // the wake and product ID read; without this it would stay there until the first poll.
+        this->finish_measurement_();
       }
     });
   });
@@ -97,58 +106,113 @@ static const uint32_t STCC4_RETRY_DELAY = 150; // datasheet: retry after 150ms
 static const float STCC4_MIN_PRESSURE_HPA = 400.0f;
 static const float STCC4_MAX_PRESSURE_HPA = 1100.0f;
 
+// Datasheet 3.4.6: longest single shot sampling interval the ASC algorithm tolerates
+static const uint32_t STCC4_MAX_GAP_MS = 600000;
+
 void STCC4Component::update() {
   if (!this->initialized_) {
+    // Reachable from the component.update action, which can fire well before setup() finishes -
+    // an on_boot automation runs while the startup chain is still waiting out the stop command.
+    // Say so rather than returning silently, since the caller asked for a measurement explicitly.
+    ESP_LOGW(TAG, "Not initialized yet, measurement skipped");
     return;
   }
 
+  if (this->measurement_mode_ == CONTINUOUS) {
+    // The sensor is awake and measuring on its own 1 s schedule, and both compensation commands are
+    // executable during measurement (datasheet 3.4 table 10), so this is a straight read.
+    this->write_compensation_();
+    this->read_measurement_();
+    return;
+  }
+
+  // Datasheet 3.4.6 step 6: sampling slower than 600 s degrades the self-calibration algorithm.
+  // The config schema bounds update_interval, but it cannot see the cadence when polling is driven
+  // by the component.update action (update_interval: never), and it cannot account for a gap that
+  // opens up at runtime - a reboot, an offline stretch, a slow automation. Warn here instead.
+  // Unsigned subtraction is wraparound-safe; a zero timestamp means this is the first measurement.
+  const uint32_t now = millis();
+  if (this->last_measurement_time_ != 0 && now - this->last_measurement_time_ > STCC4_MAX_GAP_MS) {
+    ESP_LOGW(TAG, "%" PRIu32 " s since last measurement, self-calibration expects at most 600 s",
+             (now - this->last_measurement_time_) / 1000);
+  }
+  this->last_measurement_time_ = now;
+
+  // Single shot follows datasheet 3.4.6: wake -> measure -> read -> sleep. The sensor spends the
+  // interval between measurements in sleep (1 uA) rather than idle (55 uA).
+  //
+  // The exit_sleep_mode payload byte is deliberately not acknowledged (datasheet 3.4.8), so
+  // write_command() reports failure even on a successful wake - there is nothing to check.
+  this->write_command(STCC4_CMD_EXIT_SLEEP_MODE);
+  this->set_timeout(STCC4_WAKEUP_TIME_MS, [this]() {
+    // Compensation has to be written while the sensor is awake. The values survive sleep
+    // (datasheet 3.4.7), so this only needs doing once per wake, not once per boot.
+    this->write_compensation_();
+
+    if (!this->write_command(STCC4_CMD_MEASURE_SINGLE_SHOT)) {
+      ESP_LOGW(TAG, "Failed to start single shot measurement");
+      this->status_set_warning();
+      this->finish_measurement_();  // do not strand the sensor in idle for the whole interval
+      return;
+    }
+    this->set_timeout(STCC4_SINGLE_SHOT_TIME_MS, [this]() { this->read_measurement_(); });
+  });
+}
+
+void STCC4Component::write_compensation_() {
   // Update RHT compensation from external sensors
   this->update_rht_compensation_();
 
   // Update pressure compensation from external sensor
-  if (this->ambient_pressure_source_ != nullptr) {
-    float pressure = this->ambient_pressure_source_->state;
-    if (!std::isnan(pressure)) {
-      // Clamp before casting. This is a runtime value from another sensor, so it can be anything;
-      // a negative float converted to uint16_t is undefined behavior. The bounds are the range the
-      // sensor itself accepts (datasheet 3.4.5), which also keeps the hPa -> Pa/2 scaling in
-      // update_ambient_pressure_compensation_() from overflowing uint16_t.
-      uint16_t new_pressure = static_cast<uint16_t>(clamp(pressure, STCC4_MIN_PRESSURE_HPA, STCC4_MAX_PRESSURE_HPA));
-      if (new_pressure != this->ambient_pressure_) {
-        // Only cache on success - otherwise a single failed write would match on every later poll
-        // and permanently suppress the retry, leaving the sensor on a stale compensation value.
-        if (this->update_ambient_pressure_compensation_(new_pressure)) {
-          this->ambient_pressure_ = new_pressure;
-        }
-      }
-    }
+  if (this->ambient_pressure_source_ == nullptr) {
+    return;
+  }
+  float pressure = this->ambient_pressure_source_->state;
+  if (std::isnan(pressure)) {
+    return;
   }
 
-  uint32_t wait_time = 0;
-  if (this->measurement_mode_ == SINGLE_SHOT) {
-    if (!this->write_command(STCC4_CMD_MEASURE_SINGLE_SHOT)) {
-      ESP_LOGW(TAG, "Failed to start single shot measurement");
-      this->status_set_warning();
-      return;
+  // Clamp before casting. This is a runtime value from another sensor, so it can be anything;
+  // a negative float converted to uint16_t is undefined behavior. The bounds are the range the
+  // sensor itself accepts (datasheet 3.4.5), which also keeps the hPa -> Pa/2 scaling in
+  // update_ambient_pressure_compensation_() from overflowing uint16_t.
+  uint16_t new_pressure = static_cast<uint16_t>(clamp(pressure, STCC4_MIN_PRESSURE_HPA, STCC4_MAX_PRESSURE_HPA));
+  if (new_pressure != this->ambient_pressure_) {
+    // Only cache on success - otherwise a single failed write would match on every later poll
+    // and permanently suppress the retry, leaving the sensor on a stale compensation value.
+    if (this->update_ambient_pressure_compensation_(new_pressure)) {
+      this->ambient_pressure_ = new_pressure;
     }
-    wait_time = 500;  // Single shot takes 500ms
   }
+}
 
-  this->set_timeout(wait_time, [this]() { this->read_measurement_(); });
+void STCC4Component::finish_measurement_() {
+  // Continuous mode keeps the sensor running; only single shot returns it to sleep.
+  if (this->measurement_mode_ != SINGLE_SHOT) {
+    return;
+  }
+  // Datasheet 3.4.6 step 5. Compensation values and ASC state are retained across sleep (3.4.7),
+  // so nothing needs restoring on the next wake.
+  if (!this->write_command(STCC4_CMD_ENTER_SLEEP_MODE)) {
+    ESP_LOGW(TAG, "Failed to enter sleep mode");
+  }
 }
 
 void STCC4Component::read_measurement_() {
   if (this->try_read_measurement_()) {
+    this->finish_measurement_();
     return;
   }
 
   this->set_retry(STCC4_RETRY_DELAY, STCC4_READ_RETRIES, [this](uint8_t remaining) {
     if (this->try_read_measurement_()) {
+      this->finish_measurement_();
       return RetryResult::DONE;
     }
     if (remaining == 0) {
       ESP_LOGW(TAG, "Failed to read measurement data after %u attempts", STCC4_READ_RETRIES + 1);
       this->status_set_warning();
+      this->finish_measurement_();  // give up on the reading, but still release the sensor
       return RetryResult::DONE;
     }
     ESP_LOGD(TAG, "Measurement read failed, %u retries left", remaining);

@@ -38,3 +38,29 @@ resamples the same 20-second-smoothed value more often.
 **Single shot mode: use between 5s and 600s.** The automatic self-calibration algorithm assumes a
 sampling interval in this range (datasheet §3.4.6); intervals outside it degrade calibration over
 time. 10 s is the datasheet's reference figure for the specified accuracy and average current.
+
+In single shot mode the sensor is held in sleep mode between measurements and woken only for the
+~700 ms it takes to measure and read out, following the sequence in datasheet §3.4.6. Sleep draws
+1 µA against 55 µA for idle and 950 µA for continuous mode (datasheet Table 3), so a longer update
+interval directly buys battery life. Compensation values and calibration state survive sleep
+(§3.4.7) and are not re-sent on each wake.
+
+### On-demand measurements
+
+`update_interval: never` is accepted in single shot mode. It disables automatic polling and leaves
+the sensor asleep until something triggers a measurement explicitly:
+
+```yaml
+binary_sensor:
+  - platform: gpio
+    pin: GPIO0
+    on_press:
+      - component.update: my_stcc4
+```
+
+The 5s–600s bound is not enforced at validation time in this case, because the real sampling
+cadence lives in your automation rather than in the config. It still applies: if you trigger
+measurements further apart than 600 s, self-calibration degrades exactly as it would with a
+too-long update interval. The component measures the gap between single shot measurements at
+runtime and logs a warning when it exceeds 600 s, so this shows up in the log rather than silently
+in the readings weeks later.
