@@ -36,6 +36,8 @@ class STCC4Component : public PollingComponent, public sensirion_common::Sensiri
   void attempt_read_measurement_();
   bool try_read_measurement_();
   void finish_measurement_();
+  void check_measurement_stalled_();
+  void restart_measurement_();
 
   sensor::Sensor *co2_sensor_{nullptr};
   sensor::Sensor *temperature_sensor_{nullptr};
@@ -47,7 +49,9 @@ class STCC4Component : public PollingComponent, public sensirion_common::Sensiri
   uint16_t ambient_pressure_{0};
   uint32_t last_measurement_time_{0};
   uint8_t read_retries_left_{0};
+  uint8_t failed_cycles_{0};
   bool initialized_{false};
+  bool restarting_{false};
   MeasurementMode measurement_mode_{CONTINUOUS};
 };
 

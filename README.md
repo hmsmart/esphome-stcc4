@@ -35,6 +35,24 @@ At 5 s or above, every poll finds data waiting and succeeds on the first attempt
 nothing in signal quality: CO₂ response time is τ63% = 20 s (datasheet Table 1), so 1 s polling only
 resamples the same 20-second-smoothed value more often.
 
+### Recovery from a stalled measurement
+
+A sensor in continuous mode can stop measuring without the component being told — a brownout, or an
+I²C general call reset issued by another device on the bus, which every device that honours general
+call will act on (datasheet §3.4.10). The sensor then sits in idle, acknowledging its address but
+NACKing every read, and no amount of retrying will produce data.
+
+After **three consecutive update cycles** fail outright, the component stops the measurement, waits
+out the 1200 ms execution time (§3.4.2) and starts it again, logging a warning when it does. Because
+the trigger is counted in cycles rather than seconds, recovery takes three update intervals — fast
+at 5 s, slow if you poll rarely.
+
+It waits for three cycles rather than reacting to the first on purpose. Restarting a measurement
+reinitializes the bypass phase and the timer for the first ASC state save whenever the sensor is
+within its first hour of operation (§1.1.4), so a flaky bus that restarted the measurement every
+cycle would pin the sensor at its 390 ppm bypass output and prevent it ever calibrating — a quieter
+and worse failure than the one being recovered from.
+
 **Single shot mode: use between 5s and 600s.** The automatic self-calibration algorithm assumes a
 sampling interval in this range (datasheet §3.4.6); intervals outside it degrade calibration over
 time. 10 s is the datasheet's reference figure for the specified accuracy and average current.

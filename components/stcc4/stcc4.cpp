@@ -20,6 +20,9 @@ static const uint16_t STCC4_CMD_ENTER_SLEEP_MODE = 0x3650;
 // Exit sleep is an 8-bit command (single byte 0x00), not 16-bit
 static const uint8_t STCC4_CMD_EXIT_SLEEP_MODE = 0x00;
 
+// Datasheet 3.4.2: stop_continuous_measurement execution time is 1200 ms, during which the sensor
+// does not acknowledge its address. The margin covers scheduler jitter.
+static const uint32_t STCC4_STOP_TIME_MS = 1500;
 // Datasheet 3.4.8: exit_sleep_mode execution time
 static const uint32_t STCC4_WAKEUP_TIME_MS = 5;
 // Datasheet 3.4.6: measure_single_shot execution time is 500 ms; the margin keeps the common path
@@ -32,7 +35,7 @@ void STCC4Component::setup() {
   // Unconditionally stop any running measurement from a previous boot
   this->write_command(STCC4_CMD_STOP_CONTINUOUS_MEASUREMENT);
 
-  this->set_timeout(1500, [this]() {
+  this->set_timeout(STCC4_STOP_TIME_MS, [this]() {
     // Wake sensor from sleep mode. Datasheet 3.4.8: the payload byte is deliberately not
     // acknowledged, so write_command() reports failure even when the wake succeeds - there is
     // nothing meaningful to check. The product ID read below is what confirms the sensor is awake.
@@ -109,12 +112,23 @@ static const float STCC4_MAX_PRESSURE_HPA = 1100.0f;
 // Datasheet 3.4.6: longest single shot sampling interval the ASC algorithm tolerates
 static const uint32_t STCC4_MAX_GAP_MS = 600000;
 
+// Consecutive update cycles that must fail outright before continuous measurement is restarted
+static const uint8_t STCC4_STALL_CYCLES = 3;
+
 void STCC4Component::update() {
   if (!this->initialized_) {
     // Reachable from the component.update action, which can fire well before setup() finishes -
     // an on_boot automation runs while the startup chain is still waiting out the stop command.
     // Say so rather than returning silently, since the caller asked for a measurement explicitly.
     ESP_LOGW(TAG, "Not initialized yet, measurement skipped");
+    return;
+  }
+
+  if (this->restarting_) {
+    // A restart is mid-flight and the sensor is inside the stop command's execution time, where it
+    // does not acknowledge its address at all (datasheet 3.4.2). Reachable only when the update
+    // interval is shorter than the restart takes.
+    ESP_LOGD(TAG, "Restart in progress, measurement skipped");
     return;
   }
 
@@ -205,6 +219,7 @@ void STCC4Component::read_measurement_() {
 
 void STCC4Component::attempt_read_measurement_() {
   if (this->try_read_measurement_()) {
+    this->failed_cycles_ = 0;
     this->finish_measurement_();
     return;
   }
@@ -213,12 +228,47 @@ void STCC4Component::attempt_read_measurement_() {
     ESP_LOGW(TAG, "Failed to read measurement data after %u attempts", STCC4_READ_RETRIES + 1);
     this->status_set_warning();
     this->finish_measurement_();  // give up on the reading, but still release the sensor
+    this->check_measurement_stalled_();
     return;
   }
 
   ESP_LOGD(TAG, "Measurement read failed, %u retries left", this->read_retries_left_);
   this->read_retries_left_--;
   this->set_timeout(STCC4_RETRY_DELAY, [this]() { this->attempt_read_measurement_(); });
+}
+
+void STCC4Component::check_measurement_stalled_() {
+  // Only continuous mode has measurement state that can be lost. Single shot issues its own measure
+  // command every cycle, so a failure there is not something restarting would repair.
+  if (this->measurement_mode_ != CONTINUOUS) {
+    return;
+  }
+
+  if (++this->failed_cycles_ < STCC4_STALL_CYCLES) {
+    return;
+  }
+
+  // Deliberately waits for several consecutive failed cycles rather than reacting to the first.
+  // Restarting reinitializes the bypass phase and the timer for the first ASC state save while the
+  // sensor is within its first hour of operation (datasheet 1.1.4), so a transient bus problem that
+  // triggered a restart every cycle would pin the sensor at its 390 ppm bypass output and stop it
+  // ever calibrating - a worse and much quieter failure than the one being recovered from.
+  ESP_LOGW(TAG, "No measurement data for %u consecutive cycles, restarting continuous measurement",
+           this->failed_cycles_);
+  this->failed_cycles_ = 0;
+  this->restart_measurement_();
+}
+
+void STCC4Component::restart_measurement_() {
+  // start_continuous_measurement is not executable during measurement (datasheet 3.4 table 10) and
+  // the sensor's actual state is unknown here - it may be idle, or still measuring but unable to
+  // deliver. Stop first, which is the same sequence setup() uses to reach a known state.
+  this->restarting_ = true;
+  this->write_command(STCC4_CMD_STOP_CONTINUOUS_MEASUREMENT);
+  this->set_timeout(STCC4_STOP_TIME_MS, [this]() {
+    this->restarting_ = false;
+    this->start_measurement_();
+  });
 }
 
 bool STCC4Component::try_read_measurement_() {
